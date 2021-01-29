@@ -1,0 +1,1360 @@
+---
+title: "Final analysis code"
+author: "Authors"
+date: "01/06/2020"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load packages and setup
+
+
+```{r, warning = FALSE, message = FALSE, results = "hide"}
+rm(list = ls())
+library(xlsx)
+library(scales)
+library(dplyr)
+library(stringr)
+library(haven)
+library(ggplot2)
+library(tidyverse)
+library(data.table)
+library(viridis)
+library(kableExtra)
+library(qualtRics)
+library(car)
+library(blockrand)
+library(rtf)
+library(stargazer)
+library(xtable)
+
+theme_new <- function(base_size = 16, base_family = "Helvetica"){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black")
+    )
+}
+
+
+code_agg_scales <- function(data, prefix_string,
+                            verbose = FALSE,
+                            FUN){
+  
+  
+  ## get all columns with that prefix
+  cols_withprefix = grep(sprintf("^%s", prefix_string),
+                         colnames(data),
+                         value = TRUE)
+  
+  if(verbose) print(sprintf("Coding scale based on: %s", paste(cols_withprefix, 
+                                                        collapse = ";")))
+  ## apply coding function to all columns with that pattern
+  data[, cols_withprefix] = apply(data[, cols_withprefix], 2, FUN)
+  
+  ## sum those columns and average by the number of columns considered
+  ### right now, if respondent leaves an item blank (NA) it's
+  ### still summing the rest and just dividing by a different denom
+  ### can change that by doing na.rm = FALSE and changing 
+  ### answer code- if respondent answers none, putting them as NA
+  sum_across_answered = rowSums(data[, cols_withprefix], na.rm = TRUE)
+  
+  ### get number of non-NA responses for that respondent for that scale
+  total_items_answered = rowSums(!is.na(data[, cols_withprefix]))
+  avg_across = ifelse(total_items_answered > 0,
+              (1/total_items_answered) * sum_across_answered,
+              NA_real_)
+
+  # return the vector of averages 
+  return(avg_across)
+}
+
+
+
+```
+
+
+# Load and clean data
+
+## Load and merge qualtrics to prolific attributes
+
+```{r, warning = FALSE}
+
+# Load qualtrics data
+raw_data_init = read_survey("../data/Beliefs about funding models _finalv_January 6, 2021_17.21.csv")
+
+# From raw data, filter out ones that occurred pre-launch as part
+# of testing
+raw_data <- raw_data_init %>%
+      filter(StartDate > as.Date("2020-12-27")) 
+
+stopifnot(all(raw_data$StartDate > as.Date("2020-12-27")))
+
+# Load prolific dem
+prol_dem = read.csv("../data/prolific_export_5fd1326bfc1d530abecbcd16.csv")
+
+print(sprintf("Out of %s unique ids in prolific df, %s are found in qualtrics df",
+        length(unique(prol_dem$participant_id)),
+        length(intersect(unique(prol_dem$participant_id),
+                     unique(raw_data$prol_id)))))
+
+## look at join errors of two types
+### people in prolific demographics but not found in qualtrics
+prol_notfound = setdiff(prol_dem$participant_id,
+                        raw_data$prol_id)
+
+### people in qualtrics but not found in prolific dem
+insurvey_notprol = setdiff(raw_data$prol_id_clean,
+                           prol_dem$participant_id)
+
+### clean up prol id in qualtrics to try to match with prol dem
+raw_data = raw_data %>%
+        mutate(prol_id_clean = 
+              gsub("^'-|@email.prolific.co|\\s+", "", tolower(prol_id)))
+
+sprintf("Before cleaning, %s prol dem overlapped with qualtrics, after cleaning %s overlap",
+        length(unique(intersect(raw_data$prol_id, prol_dem$participant_id_prolific))),
+        length(unique(intersect(raw_data$prol_id_clean, prol_dem$participant_id_prolific))))
+
+## rename prolific cols to distinguish b/t qualtrics cols
+colnames(prol_dem) = sprintf("%s_prolific",
+                             colnames(prol_dem))
+
+
+## rj note -- for now, just left as is and didnt try to fuzzy matching or str distance for entry errors
+## we could try to do
+            
+## left join prolific cols onto raw data
+## so that all respondents in raw data are preserved regardless of prolific status
+raw_data_wp = merge(raw_data,
+                    prol_dem,
+                    by.x = "prol_id_clean",
+                    by.y= "participant_id_prolific",
+                    all.x = TRUE) %>%
+  
+            # first, construct indicator for non-matches that are due to 
+            # wrong prolific id length (should capture the testing, dartmouth, etc)
+            mutate(is_prolid_wronglength = ifelse(nchar(prol_id_clean) != 24, TRUE, 
+                                                FALSE),
+                   is_failmerge_prol = ifelse(!prol_id_clean %in% prol_dem$participant_id_prolific,
+                                              TRUE, FALSE))
+
+
+### look at ones that fail merge-- see that they're either missing prolific
+### id entry, wrong length, testing/dartmouth, etc.- going to use wrong length
+### and fail merge later as exclusion criteria
+#View(raw_data_wp %>% filter(is_failmerge_prol))
+
+## clean up colnames
+## make colnames lowercase and remove spaces/punctuation
+colnames(raw_data_wp) = gsub("\\s+|\\(|\\)", 
+                             "", 
+                             tolower(colnames(raw_data_wp)))
+
+```
+
+
+## Clean and construct variables
+
+```{r}
+
+## construct combined timing variables
+### get all time var (distributed based on what their ranking was)
+time_var = grep("\\_time$",
+                colnames(raw_data_wp),
+                value = TRUE)
+
+### code NA to blank
+raw_data_wp[, time_var][is.na(raw_data_wp[,
+                    time_var])] <- ""
+raw_data_wp$timetrad_raw = apply(raw_data_wp[, time_var],
+             1,
+             function(x) paste(x, collapse = "")) 
+
+## construct label for all choice combos
+fr_cols = grep("fr\\_1$", colnames(raw_data_wp),
+               value = TRUE)
+raw_data_wp$choice = gsub("\\_fr_1",
+                       "",
+                names(raw_data_wp[, fr_cols])[max.col(!is.na(raw_data_wp[, fr_cols]), "first")])
+
+# Create flags and code vars
+## from looking at labels:
+### [w/m]_rankfair_1 == lottery
+### [w/m]_rankfair_2 == fcfs
+### [w/m]_rankfair_3 == points
+### and then values within are ranking
+raw_data_wp_intermed = raw_data_wp %>%
+  ### renaming attention check item in jw scale
+  ### so that it's actually the attention and  doesnt get aggregated
+        rename(attention_check_q = jw_scale_6,
+              political_ideology = q34,
+              political_affil= q35,
+              what_researchers_want = q37)
+
+raw_data_wp_cleanvar = raw_data_wp_intermed %>%
+        ### various screening
+        mutate(is_failattention = case_when(is.na(attention_check_q) ~ NA,
+                                            !grepl("Strong agreement", attention_check_q) ~ TRUE, 
+                                            TRUE ~ FALSE),
+               is_wrong_distype = case_when(distributionchannel != "anonymous" ~ TRUE, 
+                                            TRUE ~ FALSE),
+               is_cons_revok = ifelse(grepl("REVOKE", sex_prolific),
+                                        TRUE, FALSE),
+               is_non100_progress = ifelse(progress != 100, TRUE, FALSE),
+        
+        ### for main tx, some are marked as finished == false and are missing condition
+        is_any_barriers = case_when(cond %in% c("Wom", "Min") ~ TRUE,
+                                           cond == "No_info" ~ FALSE, 
+                                           TRUE ~ NA),
+               
+        ## for rankings, combine ranking across randomization to
+        ## w or m points system (Wom cond = w, M cond = m, 
+        ## no info cond = evenly split)
+                points_rank= case_when(
+                          !is.na(w_rankfair_3) ~ w_rankfair_3,
+                          !is.na(m_rankfair_3) ~ m_rankfair_3),
+                lottery_rank = case_when(
+                          !is.na(w_rankfair_1) ~ w_rankfair_1,
+                          !is.na(m_rankfair_1) ~ m_rankfair_1),
+                fcfs_rank = case_when(
+                          !is.na(w_rankfair_2) ~ w_rankfair_2,
+                          !is.na(m_rankfair_2) ~ m_rankfair_2),
+        
+        ## additional screen
+        is_missing_DV = ifelse(is.na(points_rank),
+                                      TRUE, FALSE),
+        
+        ## reverse code points so that same direction as binary
+        ## where positive coef on treatment = more favorable
+        points_rank_rev = 3-points_rank,
+        is_points_first = case_when(points_rank == 1 ~ TRUE, 
+                                        points_rank %in% c(2, 3) ~ FALSE,
+                                        TRUE ~ NA),
+        
+        ## code categorical time into continuous # of weeks
+        timetrad_weeks = 
+              case_when(grepl("as quickly", timetrad_raw) ~ 0,
+                        grepl("2 weeks", timetrad_raw) ~ 2,
+                        grepl("1 month", timetrad_raw) ~ 4,
+                        grepl("6 weeks", timetrad_raw) ~ 6,
+                        grepl("2 months", timetrad_raw) ~ 8),
+              
+              ## just world scale with non attention check items
+              ### rj note- as noted in function, if people skip some 
+              ### items but complete others, coded using num/denom
+              ### with remaining items
+              ### gives warning since codes to NA for those missing all items
+              jw_combined = code_agg_scales(raw_data_wp_intermed,
+                            prefix_string = "jw_scale",
+                            FUN = function(x){
+                            case_when(grepl("disagreement", x) ~ 1,
+                                      grepl("agreement", x) ~ 6,
+                                      TRUE ~ as.numeric(x))}),
+        
+              ### create numeric version of political ideology scale
+              ### with NA for "prefer not to say" and "not sure"
+              ### not using numeric analytically just for descriptive
+              ### higher = more conservative
+              political_ideology_numeric = case_when(grepl("Very Conserv", political_ideology) ~ 5,
+                                                     grepl("Conserv", political_ideology) ~ 4,
+                                                     grepl("Mod", political_ideology) ~ 3,
+                                                     grepl("^Lib", political_ideology) ~ 2,
+                                                     grepl("Very Lib", political_ideology) ~ 1,
+                                                     TRUE ~ NA_real_),
+              
+              ### various flags      
+              is_woman = case_when(sex_prolific == "Female" ~ TRUE,
+                                   sex_prolific == "Male" ~ FALSE,  
+                                   TRUE ~ NA),
+        
+              ### primary definition of minority is non-white
+              is_minority = case_when(is.na(raceeth) ~ NA,
+                                      !raceeth %in% c("White", "Prefer not to say", "White, Prefer not to say") ~ TRUE, 
+                                      TRUE ~ FALSE),
+              
+              ### secondary definition is only hispanic or black
+              ### for both can select multiple
+              is_minority_sec = case_when(is.na(raceeth) ~ NA,
+                                          grepl("Hispanic|Black", raceeth) ~ TRUE, 
+                                          TRUE ~ FALSE),
+               
+              ### group into broader categories
+              ### mainly comparing D, R, I
+               political_affil_buckets = case_when(
+                 political_affil %in% c("No preference",
+                              "Other party",
+                              "Prefer not to say") |
+                is.na(political_affil) ~ "Other", # include skips in others 
+                 TRUE ~ political_affil)) 
+
+```
+
+## Load free responses answers and reviewer-confirmed nonsensical 
+
+```{r}
+fr_coded_z = read.csv("../data/frcoding_finalsurvey - Xinzhe.csv")
+fr_coded_k = read.csv("../data/frcoding_finalsurvey - K to code.csv") %>%
+          rename(`Considers.relevant.appropriate.factors` = 
+        `Considers.relevant.appropriate.factors...the.preferred.method.DOES.this..and.or.the.method.they.don.t.like.does.NOT.do.this.`)
+
+fr_coded_both = rbind.data.frame(fr_coded_z,
+                                 fr_coded_k)
+
+## read in final nonsensical codes based on review
+nonsense_codes = read.csv("../data/frcoding_finalsurvey - flag_nonsensical.csv")
+
+### get prolific ids of ones flagged as yes nonsensical reviewer agree
+nonsens_prol = nonsense_codes %>%
+            filter(`reviewer_agree..1...yes..0...no.` == 1) %>%
+            pull(prol_id)
+
+## create flag in analytic df and exclude from analyses
+raw_data_wp_cleanvar = raw_data_wp_cleanvar %>%
+          mutate(is_nonsens_answer = ifelse(prol_id_clean %in% nonsens_prol, TRUE, FALSE))
+
+## some checks
+stopifnot(sum(raw_data_wp_cleanvar$is_points_first,
+              na.rm = TRUE) == 
+          nrow(raw_data_wp_cleanvar %>% filter(points_rank == 1)))
+
+# Identify any additional exact duplicates 
+exact_duplicates = fr_coded_both %>%
+  group_by(fr_why_first_over_second) %>%
+  filter(n() > 1)
+
+# 3 additional observations that are duplicates that were not flagged by RA review
+exact_duplicates$prol_id[!exact_duplicates$prol_id %in% nonsens_prol]
+
+## add flag for those exact duplicates
+raw_data_wp_cleanvar = raw_data_wp_cleanvar %>%
+          mutate(is_exact_dup_fr = ifelse(prol_id_clean %in% 
+                                    exact_duplicates$prol_id, TRUE, FALSE))
+  
+```
+
+There were 3 additional observations that were duplicates that were not flagged by RA review. 
+
+# Summarize descriptive stats
+
+Use two versions of the data
+
+1. Same version as above
+2. model_df: meets all inclusion criteria
+
+## Randomization checks (just with main data; not analytic)
+
+```{r}
+
+# Distribution of duration across conditions
+## median duration is 6 minutes
+## slightly lower for the people who read about historical barriers
+quantile(raw_data_wp_cleanvar$durationinseconds)
+raw_data_wp_cleanvar %>%
+  group_by(is_any_barriers) %>%
+  summarise(quant = paste(quantile(durationinseconds),
+                      collapse = "; ")) 
+
+# N per condition- nas still from noncompleters
+table(raw_data_wp_cleanvar$cond, useNA = "always")
+
+
+# Check that free response options were displayed correctly
+rank_cols = grep("\\_rank$", colnames(raw_data_wp_cleanvar),
+                 value = TRUE) 
+check_logic <- function(one_fr){
+  
+  ## first filter to those who filled out the fr
+  fill_resp = raw_data_wp_cleanvar %>%
+          filter(!is.na(!!sym(one_fr)))
+  
+  ## then, what the first choice should be
+  choices = unlist(strsplit(gsub("\\_fr\\_1", "", one_fr),
+                     split = ""))
+  first = choices[1]
+  second = choices[2]
+  
+  ## make sure rank matches choices
+  ### first 
+  if((first == "p" & all(fill_resp$points_rank == 1)) |
+     (first == "f" & all(fill_resp$fcfs_rank == 1)) |
+     (first == "l" & all(fill_resp$lottery_rank == 1))){
+    print(sprintf("passed first choice for: %s",
+                  one_fr))
+  } else{
+    print(sprintf("failed first choice for: %s",
+                  one_fr))
+  }
+  
+  ### second
+  if((second == "p" & all(fill_resp$points_rank == 2)) |
+     (second == "f" & all(fill_resp$fcfs_rank == 2)) |
+     (second == "l" & all(fill_resp$lottery_rank == 2))){
+    print(sprintf("passed second choice for: %s",
+                  one_fr))
+  } else{
+    print(sprintf("failed second choice for: %s",
+                  one_fr))
+  }
+  return(NULL)
+  
+}
+
+checking <- lapply(fr_cols, check_logic)
+
+```
+
+
+## Demographics/attitudes
+
+```{r}
+
+# Demographics
+dem_vars = c("sex_prolific",
+             "raceeth",
+             "political_affil",
+             "political_ideology",
+             "political_ideology_numeric",
+             "is_woman",
+             "is_minority",
+             "what_researchers_want",
+             "political_affil_buckets")
+
+## filter to modeling df
+## that passes checks:
+## (1) sensical FR,
+## (2) non-missing DV
+## (3) didnt revoke consent
+## (4) passes attention check embedded in JW scale
+## (5) comes from correct distribution channel and 
+## (6) linkable to their prolific attributes (so entered
+## code correctly)
+model_df = raw_data_wp_cleanvar %>%
+        filter(!is_nonsens_answer & !is_cons_revok &
+              !is_missing_DV &
+              (!(is_failattention | is.na(is_failattention))) &
+              !is_wrong_distype &
+              !is_failmerge_prol &
+              (!(is_prolid_wronglength | is.na(is_prolid_wronglength))) &
+              !is_non100_progress &
+              !is_exact_dup_fr) # adding exact duplicate
+
+## print n fail each filter (n filtered out is < sum due to overlap)
+lapply(raw_data_wp_cleanvar[, c("is_nonsens_answer",
+                                     "is_cons_revok",
+                                     "is_missing_DV",
+                                     "is_failattention",
+                                     "is_wrong_distype",
+                                     "is_failmerge_prol",
+                                     "is_prolid_wronglength",
+                                     "is_non100_progress",
+                                      "is_exact_dup_fr")],
+                        function(x) prop.table(table(x, useNA = "always")))
+sprintf("Once we filter, goes from %s to %s",
+        nrow(raw_data_wp_cleanvar),
+        nrow(model_df))
+
+## dem breakdowns pre filter
+lapply(raw_data_wp_cleanvar[, dem_vars],
+       function(x) table(x)) 
+
+## dem breakdowns post filter
+lapply(model_df[, dem_vars],
+       function(x) table(x)) 
+
+lapply(model_df[, dem_vars],
+       function(x) prop.table(table(x)))
+
+## n per conditions
+table(model_df$cond) ### still about even, slightly lower in minorities
+table(model_df$is_any_barriers)
+```
+
+
+# Descriptives on outcome
+
+```{r}
+
+# add descriptive condition
+model_df = model_df %>%
+        mutate(cond_4graph = case_when(cond == "Min" ~ "Barriers\nminorities",
+                                       cond == "Wom" ~ "Barriers\nwomen",
+                                       cond == "No_info" ~ "No barriers\ntreatment"),
+               barriers_4graph = case_when(is_any_barriers ~ "Either barriers\ntreatment",
+                                           TRUE ~ "No barriers\ntreatment"))
+
+## color map - can change if we change
+# https://www.color-hex.com/color-palette/103796
+col_map_detailed = c("Barriers\nminorities" = "#09382f",
+                     "Barriers\nwomen" = "#c99910",
+                     "No barriers\ntreatment" = "wheat4")
+col_map_coarse = c("Either barriers\ntreatment" = "#be3d3d",
+                     "No barriers\ntreatment" = "wheat4")
+
+## first, show raw distribution of ranks across three groups
+dist_rank_plot <- ggplot(model_df, aes(x = points_rank,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_histogram(bins = 3, position = "dodge", color = "black") +
+  theme_new(base_size = 24) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = c(0.7, 0.7)) +
+  labs(fill = "") +
+  ylab("Count of respondents") +
+  scale_fill_manual(values = col_map_detailed) 
+
+dist_rank_plot
+ggsave("../output/figs/rankings_count_3groups.png",
+       plot = dist_rank_plot,
+       width = 12,
+       height = 8) 
+
+
+## proportions choose: barriers versus not
+## since uneven counts between any barriers and 
+## no barriers, get proportions
+prop_choose = model_df %>%
+        group_by(points_rank, barriers_4graph) %>%
+        summarise(num = n()) %>%
+        left_join(model_df %>%
+                group_by(barriers_4graph) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot <- ggplot(prop_choose, aes(x = points_rank,
+                        y = prop_choose,
+                        group = barriers_4graph,
+                        fill = barriers_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_coarse) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = c(0.7, 0.7)) +
+  labs(fill = "Any barriers info?") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = barriers_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition choosing")
+
+prop_choose_plot
+ggsave("../output/figs/rankings_prop_2groups.png",
+       plot = prop_choose_plot,
+       width = 12,
+       height = 8) 
+
+
+## repeat but for the more detailed barriers condition
+prop_choose_detail = model_df %>%
+        group_by(points_rank, cond_4graph) %>%
+        summarise(num = n()) %>%
+        left_join(model_df %>%
+                group_by(cond_4graph) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot_detail <- ggplot(prop_choose_detail, aes(x = points_rank,
+                        y = prop_choose,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_detailed) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = c(0.7, 0.7)) +
+  labs(fill = "Condition") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = cond_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition choosing")
+
+prop_choose_plot_detail
+ggsave("../output/figs/rankings_prop_3groups.png",
+       plot = prop_choose_plot_detail,
+       width = 12,
+       height = 8) 
+
+## do figure on raw rates by political affiliation
+prop_choose_detail_waffil = model_df %>%
+        group_by(points_rank, cond_4graph, political_affil_buckets) %>%
+        summarise(num = n()) %>%
+        left_join(model_df %>%
+                group_by(cond_4graph, political_affil_buckets) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot_detail_waffil <- ggplot(prop_choose_detail_waffil, aes(x = points_rank,
+                        y = prop_choose,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_detailed) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = "bottom") +
+  labs(fill = "Condition") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = cond_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition x affiliation choosing") +
+  facet_wrap(~factor(political_affil_buckets,
+                     levels = c("Democrat", "Independent",
+                                "Republican", "Other"),
+                     ordered = TRUE), ncol = 2)
+
+prop_choose_plot_detail_waffil
+ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil.png",
+       plot = prop_choose_plot_detail_waffil,
+       width = 12,
+       height = 8) 
+
+prop_choose_plot_detail_waffil_excludeother <- ggplot(prop_choose_detail_waffil %>%
+                        filter(political_affil_buckets != "Other"), aes(x = points_rank,
+                        y = prop_choose,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_detailed) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = "bottom") +
+  labs(fill = "Condition") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = cond_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition x affiliation choosing") +
+  facet_wrap(~factor(political_affil_buckets,
+                     levels = c("Democrat", "Independent",
+                                "Republican"),
+                     ordered = TRUE), ncol = 3)
+
+prop_choose_plot_detail_waffil_excludeother
+ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil_excludeother.png",
+       plot = prop_choose_plot_detail_waffil_excludeother,
+       width = 12,
+       height = 8) 
+
+## For those who chose points, how many weeks are they willing to wait
+## one missing
+time_plot <- ggplot(model_df %>%
+                filter(is_points_first &
+                      !is.na(timetrad_weeks)), aes(x = factor(timetrad_weeks))) +
+  geom_bar(stat = "count", fill = "wheat4", col = "black") +
+  xlab("Among those who ranked points system most fair,\nnumber of weeks willing to make business wait?") +
+  theme_new() +
+  ylab("Count of respondents")
+
+time_plot
+
+ggsave("../output/figs/among_points_timedist.png",
+       plot = time_plot,
+       width = 12,
+       height = 8) 
+
+```
+
+## Distribution of values for main items
+
+```{r}
+summary(model_df$jw_combined)
+sd(model_df$jw_combined)
+
+
+table(model_df$political_ideology)
+table(model_df$political_affil_buckets)
+table(model_df$political_affil)
+
+```
+# Analytic
+
+## Hyp 1: barriers tx causes (1) higher ranking of points system (lower rank) and (2) higher likelihood of ranking points first
+
+```{r}
+## continuous regressing rank of points
+## reverse coded so that pos coef = rank higher
+summary(lm(points_rank ~ is_any_barriers,
+           data = model_df))
+
+## binary regressing points as first
+## use lpm
+summary(lm(is_points_first ~ is_any_barriers,
+           data = model_df))
+
+
+```
+
+```{r}
+## save
+stargazer(lm(points_rank ~ is_any_barriers,
+           data = model_df),
+          lm(is_points_first ~ is_any_barriers,
+           data = model_df),
+          type = "html",
+          out="../output/tables/maineffect_regs.doc")
+
+
+```
+
+
+## Hyp 2: barriers tx causes respondents to rate it more important to prioritize that group
+
+
+RJ note: programming issue so cant use (or can only use for female condition) since issue w/ parallel q structure across W and M
+
+```{r}
+## notes on importance ratings
+#  The  first  asks  respondents  whether  it  is  important  for  a  method  toprioritize [women/minority-owned] businesses (Yes;  No;  Not sure).  The secondquestion depends on responses to the first question:  respondents who indicatedthat it wasnotimportant to prioritize [women/minority-owned] businesses will beasked how important it is that the underserved group was not advantaged, whilerespondents who indicated that itwasimportant to prioritize those businesses willbe asked how important it is that the underserved group got an advantage.  Wewill combine these two questions to create a scale ranging from -3 (very important5
+# that underserved group got no advantage) to 0 (not sure) to 3 (very importantthat underserved group got an advantage)
+ 
+
+```
+
+## Hyp 3: differences in tx effect between minority barriers treatment and women's barrier treatment
+
+1. Filter to respondents randomized to those two
+2. Reg is comparing those two
+
+
+```{r}
+## filter to some barrier randomization
+barriers_r = model_df %>%
+        filter(cond != "No_info") 
+
+
+## when women is the tx, slightly more likely
+## to rank points higher/first than when minority is tx
+summary(lm(points_rank ~ cond,
+           data = barriers_r))
+
+summary(lm(is_points_first ~ cond,
+           data = barriers_r))
+
+
+```
+
+
+```{r}
+## save
+stargazer(lm(points_rank ~ cond,
+           data = barriers_r),
+          lm(is_points_first ~ cond,
+           data = barriers_r),
+          type = "html",
+          out="../output/tables/womenvmob_barriers_regs.doc")
+
+
+
+```
+
+
+## Hyp 4: interaction between treatment and respondent's status in underserved group
+
+Similar to above, filters to those randomized to one of the barrier conditions
+
+```{r}
+
+## women
+summary(lm(points_rank ~ cond*is_woman,
+           data = barriers_r))
+
+## minority
+summary(lm(points_rank ~ relevel(factor(cond),
+                                    ref = "Wom")*is_minority,
+           data = barriers_r))
+
+## minority (any black or Hispanic)
+summary(lm(points_rank ~ relevel(factor(cond),
+                                    ref = "Wom")*is_minority_sec,
+           data = barriers_r))
+## maybe viz
+
+```
+
+
+## Hyp 5: interaction b/t other respondent demographics and treatment
+
+Uses all respondents and pools the barriers treatment into single treatment
+
+### Just world
+
+```{r}
+## first, just world
+summary(lm(points_rank ~ is_any_barriers*jw_combined,
+           data = model_df))
+
+## binary regressing points as first
+## use lpm
+summary(lm(is_points_first ~ is_any_barriers*jw_combined,
+           data = model_df))
+
+
+### store ranking obj and do predict- predict ACTUAL RANK 
+### and not reverse rank to avoid confusion
+points_rank_lm_jw = lm(points_rank ~ is_any_barriers*jw_combined,
+                       data = model_df)
+
+### doing from top 5% to top 95% of jw scale
+### 
+predict_jw_df = data.frame(is_any_barriers = rep(c(TRUE, FALSE),
+                                                 each = 100),
+                           jw_combined = rep(seq(from = quantile(model_df$jw_combined,
+                                                              probs = 0.05),
+                                                 to = quantile(model_df$jw_combined,
+                                                              probs = 0.95),
+                                                 length.out = 100), 
+                                             2)) 
+
+## predict across all values of jw
+predicted_rank = predict(points_rank_lm_jw,
+                         newdata = predict_jw_df,
+                         se.fit = TRUE)
+
+predicted_rank_4graph = cbind(predict_jw_df,
+                        data.frame(estimate = predicted_rank$fit,
+                        se = predicted_rank$se.fit)) %>%
+                mutate(lower = estimate -1.96 *se,
+                       upper = estimate + 1.96*se,
+                       barriers_4graph = case_when(is_any_barriers ~ "Either barriers\ntreatment",
+                                           TRUE ~ "No barriers\ntreatment"))
+
+jw_prediction_graph = ggplot(predicted_rank_4graph, aes(x = jw_combined, y = estimate, 
+                                  group = barriers_4graph,
+                                  color = barriers_4graph)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = barriers_4graph),
+              alpha = 0.2) +
+  theme_new() +
+  scale_color_manual(values = col_map_coarse) +
+  scale_fill_manual(values = col_map_coarse) +
+  theme(legend.position = c(0.7, 0.2),
+        legend.background = element_blank()) +
+  xlab("Just world scale\n(higher = more belief in just world)") +
+  ylab("Predicted ranking of points system\nrelative to lottery and first-come first-served\n(lower = rank first)") +
+  ylim(0.8, 2.8) +
+  labs(fill = "Any barriers\ninfo?",
+       color = "Any barriers\ninfo?")
+
+jw_prediction_graph
+
+ggsave("../output/figs/jw_prediction.png",
+       plot = jw_prediction_graph,
+       width = 12,
+       height = 8) 
+
+
+```
+
+
+### Political affiliation
+
+```{r}
+summary(lm(points_rank ~ is_any_barriers*relevel(factor(political_affil_buckets),
+                                                     ref = "Democrat"),
+           data = model_df))
+
+## binary regressing points as first
+summary(lm(is_points_first ~ is_any_barriers*relevel(factor(political_affil_buckets),
+                                                     ref = "Democrat"),
+           data = model_df))
+
+```
+
+### What's relationship between political affiliation, just world scale, and pol ideology?
+
+Republicans more evenly distributed throughout ranking distribution and have higher mean just world scale
+
+Independents between dems and r on ideology scale 
+
+```{r}
+ggplot(model_df, aes(x = jw_combined)) +
+  geom_density() +
+  facet_wrap(~political_affil_buckets)
+
+
+model_df %>%
+  group_by(political_affil_buckets) %>%
+  summarise(mean_jw = mean(jw_combined),
+            mean_ideology_higher_conserv = mean(political_ideology_numeric,
+                                                na.rm = TRUE)) # remove na since coded prefer not/etc to na for numeric version
+
+```
+
+### Political ideology
+
+Coded as numeric where 1 = very conservative, 5 = very liberal
+
+```{r}
+summary(lm(points_rank ~ is_any_barriers*political_ideology_numeric,
+           data = model_df))
+
+## binary regressing points as first
+summary(lm(is_points_first ~ is_any_barriers*political_ideology_numeric,
+           data = model_df))
+
+## generate pred using real rank
+points_rank_lm_polid = lm(points_rank ~ is_any_barriers*political_ideology_numeric,
+                          data = model_df)
+
+predict_polid_df = data.frame(is_any_barriers = rep(c(TRUE, FALSE),
+                                                 each = 5),
+                           political_ideology_numeric = rep(seq(from = 1,
+                                                 to = 5), 
+                                             2)) 
+
+## predict across all values of jw
+predicted_rank_pol = predict(points_rank_lm_polid,
+                         newdata = predict_polid_df,
+                         se.fit = TRUE)
+
+predicted_rank_4graph_pol = cbind(predict_polid_df,
+                        data.frame(estimate = predicted_rank_pol$fit,
+                        se = predicted_rank_pol$se.fit)) %>%
+                mutate(lower = estimate -1.96 *se,
+                       upper = estimate + 1.96*se,
+                       barriers_4graph = case_when(is_any_barriers ~ "Either barriers\ntreatment",
+                                           TRUE ~ "No barriers\ntreatment"))
+
+pol_prediction_graph = ggplot(predicted_rank_4graph_pol, aes(x = factor(political_ideology_numeric), y = estimate, 
+                                  group = barriers_4graph,
+                                  color = barriers_4graph)) +
+  geom_point(position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper, color = barriers_4graph),
+              width = 0.2,
+              position = position_dodge(width = 1)) +
+  theme_new(base_size = 24) +
+  scale_color_manual(values = col_map_coarse) +
+  theme(legend.position = c(0.7, 0.2),
+        legend.background = element_blank()) +
+  xlab("Political ideology\n(1 = Very liberal; 3 = Moderate; 5 = Very conservative)") +
+  ylab("Predicted ranking of points system\nrelative to lottery and first-come first-served\n(lower = rank first)") +
+  ylim(1, 2.5) +
+  labs(color = "Any barriers\ninfo?")
+
+pol_prediction_graph
+
+ggsave("../output/figs/pol_prediction.png",
+       plot = pol_prediction_graph,
+       width = 12,
+       height = 8) 
+
+
+## could relabel with actual values
+
+```
+
+
+## Merge free responses
+
+### Table summarizing coding
+
+```{r}
+## first, left join fr onto: (1) analytic sample (so not looking at proportions for those excluded
+## and (2) limited to treatment and demographics
+## joining by prol_id rather than prol_id_clean since
+## we didn't do id cleaning before writing for coding
+colnames(fr_coded_both) = gsub("\\.+", "_", colnames(fr_coded_both))
+
+
+fr_thematic_cols = setdiff(colnames(fr_coded_both),
+                           c("prol_id", "choice",
+                             "fr_why_first_over_second",
+                             "fr_why_second_over_third",
+                             "coder",
+                             "Nonsensical_1_yes_0_no_",
+                             "Other_reasons",
+                             "Comments_on_other_reasons"))
+
+model_df_wresp= model_df %>%
+            select(prol_id, prol_id_clean, 
+                   cond, points_rank,
+                   is_woman, raceeth, 
+                   is_minority, 
+                   political_affil,
+                   political_affil_buckets,
+                   political_ideology,
+                   jw_combined) %>%
+            left_join(fr_coded_both, by = "prol_id") %>%
+            mutate(is_matched_tofr = ifelse(prol_id %in% fr_coded_both$prol_id,
+                                            TRUE, FALSE)) %>%
+            filter(is_matched_tofr) # one not matched due to not filling out fr but having non-missing DV
+    
+
+## there are 9ish that have NA due to being initially coded as nonsensical 
+## but that heather reversed codes for--- judgment was that they didnt fit theme so code
+## their thematic cols to 0
+model_df_wresp[, fr_thematic_cols][is.na(model_df_wresp[, fr_thematic_cols])] <- 0
+
+## find overall proportions
+prop_themes_all = data.frame(proportion_resp = colMeans(model_df_wresp[, fr_thematic_cols])) %>%
+            arrange(desc(proportion_resp))
+prop_themes_all$theme = rownames(prop_themes_all)
+write.table(prop_themes_all, 
+    file = "../output/tables/overall_fr_themes.txt",
+    sep = ",", quote = FALSE, row.names = F)
+write.csv(prop_themes_all, 
+    file = "../output/tables/overall_fr_themes.csv",
+     quote = FALSE, row.names = F)
+
+## proportions by condition
+prop_by_cond = model_df_wresp %>%
+            group_by(cond) %>%
+            summarise_at(.vars = fr_thematic_cols, mean) # for this, among no_info, since half randomzied to points system
+            # about women or minorities, those mention that 
+write.table(prop_by_cond, 
+    file = "../output/tables/themes_by_treatcondition.txt",
+    sep = ",", quote = FALSE, row.names = F)
+write.csv(prop_by_cond, 
+    file = "../output/tables/themes_by_treatcondition.csv",
+     quote = FALSE, row.names = F)
+
+## proportions by rank for points system
+prop_by_rank = model_df_wresp %>%
+            group_by(points_rank) %>%
+            summarise_at(.vars = fr_thematic_cols, mean) # for this, among no_info, since half randomzied to points system
+            # about women or minorities, those mention that 
+write.table(prop_by_rank, 
+    file = "../output/tables/themes_by_pointsranking.txt",
+    sep = ",", quote = FALSE, row.names = F)
+write.csv(prop_by_rank, 
+    file = "../output/tables/themes_by_pointsranking.csv",
+     quote = FALSE, row.names = F)
+
+
+
+## visualize using shorthand
+prop_by_rank_long = reshape2::melt(prop_by_rank, id.var = "points_rank") %>%
+              mutate(theme_short = 
+                    case_when(grepl("^Propensity", variable) ~ "Fraud/gaming",
+                              grepl("^Ability", variable) ~ "Helps\nneediest",
+                              grepl("personal_resources", variable) ~ "Resources\nto learn",
+                              grepl("bias_discrimination", variable) ~ "Bias\ndiscrimination",
+                              grepl("reward_applicant", variable) ~ "Rewards\neffort",
+                              grepl("randomness", variable) ~ "Randomness\nbad",
+                              grepl("appropriate", variable) ~ "Appropriate\nfactors",
+                              grepl("^Women", variable) ~ "Mentions\nwomen",
+                              grepl("^Racial", variable) ~ "Mentions\nracial/eth minorities"))
+
+
+ggplot(prop_by_rank_long, aes(x = reorder(factor(theme_short), value), y = value,
+                              group = factor(points_rank),
+                              fill = factor(points_rank))) +
+  geom_bar(stat = "identity", position = "dodge",
+           color = "black") +
+  coord_flip() +
+  theme_new() +
+  scale_fill_viridis(discrete = TRUE) +
+  ylab("Proportion\nresponses\nthat fit the theme") +
+  xlab("") +
+  theme(legend.position = c(0.7, 0.3)) +
+  labs(fill = "Points\nsystem\nrank")
+
+ggsave("../output/figs/prop_frthemes_byrank.png",
+       plot = last_plot(),
+       width = 12,
+       height = 8) 
+
+## breakdown by political ideology
+prop_by_rank_byideol = reshape2::melt(model_df_wresp %>%
+            mutate(ideology_broad = case_when(
+              grepl("Conservative", political_ideology) ~ 
+                "Conservative/Very conservative",
+              grepl("Liberal", political_ideology) ~ "Liberal/Very Liberal",
+              grepl("Moderate", political_ideology) ~ "Moderate",
+              TRUE ~ "Other"
+            )) %>%
+            filter(ideology_broad != "Other") %>%
+            group_by(ideology_broad, points_rank) %>%
+            summarise_at(.vars = fr_thematic_cols, mean),
+            id.vars = c("ideology_broad", "points_rank")) %>%
+              mutate(theme_short = 
+                    case_when(grepl("^Propensity", variable) ~ "Fraud/gaming",
+                              grepl("^Ability", variable) ~ "Helps\nneediest",
+                              grepl("personal_resources", variable) ~ "Resources\nto learn",
+                              grepl("bias_discrimination", variable) ~ "Bias/\ndiscrimination",
+                              grepl("reward_applicant", variable) ~ "Rewards\neffort",
+                              grepl("randomness", variable) ~ "Randomness\nbad",
+                              grepl("appropriate", variable) ~ "Appropriate\nfactors",
+                              grepl("^Women", variable) ~ "Mentions\nwomen",
+                              grepl("^Racial", variable) ~ "Mentions\nracial/eth minorities"))
+
+ggplot(prop_by_rank_byideol, aes(x = reorder(factor(theme_short), value), y = value,
+                              group = factor(points_rank),
+                              fill = factor(points_rank))) +
+  geom_bar(stat = "identity", position = "dodge",
+           color = "black") +
+  coord_flip() +
+  theme_new() +
+  scale_fill_viridis(discrete = TRUE) +
+  ylab("Proportion\nresponses\nthat fit the theme") +
+  xlab("") +
+  theme(legend.position = "bottom") +
+  labs(fill = "Points\nsystem\nrank") +
+  facet_wrap(~ideology_broad, ncol = 3) 
+  
+
+ggsave("../output/figs/prop_frthemes_byrank_byideology.png",
+       plot = last_plot(),
+       width = 12,
+       height = 8) 
+```
+
+### Sheet to upload
+
+
+```{r}
+write.csv(model_df_wresp %>%
+      arrange(desc(points_rank),
+              political_affil_buckets),
+      "../output/fr_forquotes.csv",
+      row.names = FALSE) 
+
+```
+
+## Robustness check subsetting based on experimenter demand
+
+```{r}
+## exclude people who either said:
+## (1) want points system most fair or 
+## (2) might want 
+model_df_nodemand = model_df %>%
+          filter(!grepl("points was the most fair", what_researchers_want)) %>%
+          mutate(barriers_4graph = case_when(is_any_barriers ~ "Either barriers\ntreatment",
+                                           TRUE ~ "No barriers\ntreatment"),
+                 cond_4graph = case_when(cond == "Min" ~ "Barriers\nminorities",
+                                       cond == "Wom" ~ "Barriers\nwomen",
+                                       cond == "No_info" ~ "No barriers\ntreatment"))
+
+## redo overall proportions 
+prop_choose_nd = model_df_nodemand %>%
+        group_by(points_rank, barriers_4graph) %>%
+        summarise(num = n()) %>%
+        left_join(model_df_nodemand %>%
+                group_by(barriers_4graph) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot_nd <- ggplot(prop_choose_nd, aes(x = points_rank,
+                        y = prop_choose,
+                        group = barriers_4graph,
+                        fill = barriers_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_coarse) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = c(0.7, 0.7)) +
+  labs(fill = "Any barriers info?") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = barriers_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition choosing")
+
+prop_choose_plot_nd
+ggsave("../output/figs/rankings_prop_2groups_excludedemand.png",
+       plot = prop_choose_plot_nd,
+       width = 12,
+       height = 8) 
+
+
+### repeat for sub ones
+prop_choose_detail_nd = model_df_nodemand %>%
+        group_by(points_rank, cond_4graph) %>%
+        summarise(num = n()) %>%
+        left_join(model_df_nodemand %>%
+                group_by(cond_4graph) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot_detail_nd <- ggplot(prop_choose_detail_nd, aes(x = points_rank,
+                        y = prop_choose,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_detailed) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = c(0.7, 0.7)) +
+  labs(fill = "Condition") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = cond_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition choosing")
+
+prop_choose_plot_detail_nd
+ggsave("../output/figs/rankings_prop_3groups_nd.png",
+       plot = prop_choose_plot_detail_nd,
+       width = 12,
+       height = 8) 
+
+## do figure on raw rates by political affiliation
+prop_choose_detail_waffil_nd = model_df_nodemand %>%
+        group_by(points_rank, cond_4graph, political_affil_buckets) %>%
+        summarise(num = n()) %>%
+        left_join(model_df_nodemand %>%
+                group_by(cond_4graph, political_affil_buckets) %>%
+                summarise(denom = n())) %>%
+        mutate(prop_choose = num/denom) %>%
+        ungroup() 
+
+prop_choose_plot_detail_waffil_nd <- ggplot(prop_choose_detail_waffil_nd, aes(x = points_rank,
+                        y = prop_choose,
+                        group = cond_4graph,
+                        fill = cond_4graph)) +
+  geom_bar(stat = "identity",
+           position = "dodge", col = "black") +
+  theme_new(base_size = 24) +
+  scale_fill_manual(values = col_map_detailed) +
+  xlab("Ranking of points system (1 = first; 3 = last)") +
+  theme(legend.position = "bottom") +
+  labs(fill = "Condition") +
+  geom_label(aes(x = points_rank, y = prop_choose,
+                 group = cond_4graph,
+
+                 label = round(prop_choose, 2)),
+             position = position_dodge(width = 1),
+             fill = "white") +
+  ylab("Proportion respondents\nin condition x affiliation choosing") +
+  facet_wrap(~factor(political_affil_buckets,
+                     levels = c("Democrat", "Independent",
+                                "Republican", "Other"),
+                     ordered = TRUE), ncol = 2)
+
+prop_choose_plot_detail_waffil_nd
+ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil_nd.png",
+       plot = prop_choose_plot_detail_waffil_nd,
+       width = 12,
+       height = 8) 
+
+
+## run two main regs
+## continuous regressing rank of points
+## reverse coded so that pos coef = rank higher
+summary(lm(points_rank ~ is_any_barriers,
+           data = model_df_nodemand))
+
+## binary regressing points as first
+## use lpm
+summary(lm(is_points_first ~ is_any_barriers,
+           data = model_df_nodemand))
+
+
+stargazer(lm(points_rank ~ is_any_barriers,
+           data = model_df_nodemand),
+          lm(is_points_first ~ is_any_barriers,
+           data = model_df_nodemand))
+
+```
+
+
+## Additional viz on descriptive correlations between outcomes
+
+
+```{r}
+jw_poli_ideo_plot = ggplot(model_df, aes(x = factor(political_ideology, 
+                                                     levels = c("Very Conservative","Conservative", "Moderate",
+                                                                "Liberal", "Very Liberal", "Not Sure", "Prefer not to say"),
+                                                     ordered = TRUE),
+                                            y = jw_combined)) +
+  geom_boxplot() +
+  #theme_new(base_size = 24) needs to fix the size of x label, could add color too
+  scale_fill_manual(values = col_map_coarse) +
+  xlab("Political ideology") +
+  ylab("Combined just world scale") +
+  theme_new() +
+  scale_y_continuous(limits = c(from = 0, to = 6),
+                    breaks = pretty_breaks(n = 6)) +
+  coord_flip() 
+
+ggsave("../output/figs/jw_poli_ideo_plot.png",
+       plot = jw_poli_ideo_plot,
+       width = 12,
+       height = 8) 
+
+jw_poli_affil_plot = ggplot(model_df, aes(x = factor(political_affil_buckets,
+                                        levels = c("Democrat",
+                                                   "Other",
+                                                   "Independent",
+                                                   "Republican"),
+                                        ordered = TRUE),
+                                            y = jw_combined)) +
+  geom_boxplot() +
+  #theme_new(base_size = 24) needs to fix the size of x label, could add color too
+  scale_fill_manual(values = col_map_coarse) +
+  xlab("Political ideology") +
+  ylab("Combined just world scale") +
+  theme_new() +
+  scale_y_continuous(limits = c(from = 0, to = 6),
+                    breaks = pretty_breaks(n = 6)) +
+  coord_flip() 
+
+ggsave("../output/figs/jw_poli_affil_plot.png",
+       plot = jw_poli_affil_plot,
+       width = 12,
+       height = 8) 
+
+
+#histogram of bjw scores faceted by ideology
+jw_poli_affil_plot <- ggplot(model_df, aes(x=political_ideology_numeric, na.rm = TRUE)) +
+  geom_histogram(color="black", fill="#c99910") +
+  theme_new(base_size = 24) +
+  facet_wrap(~factor(political_affil_buckets,
+                     levels = c("Democrat", "Independent",
+                                "Republican", "Other"),
+                     ordered = TRUE)) +
+  xlab("Combinded just world scale") +
+  ylab("Count")
+jw_poli_affil_plot
+ggsave("../output/figs/jw_poli_affil_plot.png",
+       plot = jw_poli_affil_plot,
+       width = 12,
+       height = 8) 
+
+```
+
+
+## Ranks beyond points
+
+```{r}
+## distribution of ranks for lottery and fcfc
+table(model_df$lottery_rank)
+table(model_df$fcfs_rank)
+```
