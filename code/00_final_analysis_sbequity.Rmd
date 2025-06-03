@@ -1,7 +1,7 @@
 ---
 title: "Final analysis code"
 author: "Authors"
-date: "01/06/2020"
+date: "06/02/2025"
 output:
   html_document:
     toc: yes
@@ -19,10 +19,11 @@ editor_options:
 
 ```{r, warning = FALSE, message = FALSE, results = "hide"}
 rm(list = ls())
-library(xlsx)
+#library(xlsx)
 library(scales)
 library(dplyr)
 library(stringr)
+library(here)
 library(haven)
 library(ggplot2)
 library(tidyverse)
@@ -35,6 +36,7 @@ library(blockrand)
 library(rtf)
 library(stargazer)
 library(xtable)
+library(psych)
 
 theme_new <- function(base_size = 16, base_family = "Helvetica"){
   theme_bw(base_size = base_size, base_family = base_family) %+replace%
@@ -93,7 +95,7 @@ code_agg_scales <- function(data, prefix_string,
 ```{r, warning = FALSE}
 
 # Load qualtrics data
-raw_data_init = read_survey("../data/Beliefs about funding models _finalv_January 6, 2021_17.21.csv")
+raw_data_init = read_survey(here("data/Beliefs about funding models _finalv_January 6, 2021_17.21.csv"))
 
 # From raw data, filter out ones that occurred pre-launch as part
 # of testing
@@ -103,7 +105,7 @@ raw_data <- raw_data_init %>%
 stopifnot(all(raw_data$StartDate > as.Date("2020-12-27")))
 
 # Load prolific dem
-prol_dem = read.csv("../data/prolific_export_5fd1326bfc1d530abecbcd16.csv")
+prol_dem = read.csv(here("data/prolific_export_5fd1326bfc1d530abecbcd16.csv"))
 
 print(sprintf("Out of %s unique ids in prolific df, %s are found in qualtrics df",
         length(unique(prol_dem$participant_id)),
@@ -305,8 +307,8 @@ raw_data_wp_cleanvar = raw_data_wp_intermed %>%
 ## Load free responses answers and reviewer-confirmed nonsensical 
 
 ```{r}
-fr_coded_z = read.csv("../data/frcoding_finalsurvey - Xinzhe.csv")
-fr_coded_k = read.csv("../data/frcoding_finalsurvey - K to code.csv") %>%
+fr_coded_z = read.csv(here("data/frcoding_finalsurvey - Xinzhe.csv"))
+fr_coded_k = read.csv(here("data/frcoding_finalsurvey - K to code.csv")) %>%
           rename(`Considers.relevant.appropriate.factors` = 
         `Considers.relevant.appropriate.factors...the.preferred.method.DOES.this..and.or.the.method.they.don.t.like.does.NOT.do.this.`)
 
@@ -314,7 +316,7 @@ fr_coded_both = rbind.data.frame(fr_coded_z,
                                  fr_coded_k)
 
 ## read in final nonsensical codes based on review
-nonsense_codes = read.csv("../data/frcoding_finalsurvey - flag_nonsensical.csv")
+nonsense_codes = read.csv(here("data/frcoding_finalsurvey - flag_nonsensical.csv"))
 
 ### get prolific ids of ones flagged as yes nonsensical reviewer agree
 nonsens_prol = nonsense_codes %>%
@@ -516,7 +518,7 @@ dist_rank_plot <- ggplot(model_df, aes(x = points_rank,
   scale_fill_manual(values = col_map_detailed) 
 
 dist_rank_plot
-ggsave("../output/figs/rankings_count_3groups.png",
+ggsave(here("output/figs/rankings_count_3groups.png"),
        plot = dist_rank_plot,
        width = 12,
        height = 8) 
@@ -554,7 +556,7 @@ prop_choose_plot <- ggplot(prop_choose, aes(x = points_rank,
   ylab("Proportion respondents\nin condition choosing")
 
 prop_choose_plot
-ggsave("../output/figs/rankings_prop_2groups.png",
+ggsave(here("output/figs/rankings_prop_2groups.png"),
        plot = prop_choose_plot,
        width = 12,
        height = 8) 
@@ -590,7 +592,7 @@ prop_choose_plot_detail <- ggplot(prop_choose_detail, aes(x = points_rank,
   ylab("Proportion respondents\nin condition choosing")
 
 prop_choose_plot_detail
-ggsave("../output/figs/rankings_prop_3groups.png",
+ggsave(here("output/figs/rankings_prop_3groups.png"),
        plot = prop_choose_plot_detail,
        width = 12,
        height = 8) 
@@ -629,7 +631,7 @@ prop_choose_plot_detail_waffil <- ggplot(prop_choose_detail_waffil, aes(x = poin
                      ordered = TRUE), ncol = 2)
 
 prop_choose_plot_detail_waffil
-ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil.png",
+ggsave(here("output/figs/rankings_prop_3groups_wpoliticalaffil.png"),
        plot = prop_choose_plot_detail_waffil,
        width = 12,
        height = 8) 
@@ -659,7 +661,7 @@ prop_choose_plot_detail_waffil_excludeother <- ggplot(prop_choose_detail_waffil 
                      ordered = TRUE), ncol = 3)
 
 prop_choose_plot_detail_waffil_excludeother
-ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil_excludeother.png",
+ggsave(here("output/figs/rankings_prop_3groups_wpoliticalaffil_excludeother.png"),
        plot = prop_choose_plot_detail_waffil_excludeother,
        width = 12,
        height = 8) 
@@ -676,10 +678,50 @@ time_plot <- ggplot(model_df %>%
 
 time_plot
 
-ggsave("../output/figs/among_points_timedist.png",
+ggsave(here("output/figs/among_points_timedist.png"),
        plot = time_plot,
        width = 12,
        height = 8) 
+
+```
+
+### Additional descriptives
+
+```{r}
+## correlation between gender and rankings 
+## no differences though women slightly more favorable to points systems
+model_df %>% group_by(is_woman) %>% summarise(mean(points_rank))
+summary(lm(points_rank ~ is_woman, data = model_df))
+
+## correlation between race/ethnicity and rankings
+## minorities more favorable to points system (negative coef = ranked closer to 1)
+model_df %>% group_by(is_minority) %>% summarise(mean(points_rank))
+summary(lm(points_rank ~ is_minority, data = model_df))
+
+model_df %>% group_by(is_minority_sec) %>% summarise(mean(points_rank)) # secondary definition black and hispanic
+summary(lm(points_rank ~ is_minority_sec, data = model_df))
+
+
+## lots of categories so difficult to interpret 
+model_df %>% filter(!is.na(raceeth)) %>% group_by(raceeth) %>% summarise(mean(points_rank))
+summary(lm(points_rank ~ raceeth, data = model_df))
+
+## correlation between political affil and political ideology
+model_df %>% group_by(political_affil_buckets) %>% summarise(mean_polideology = mean(political_ideology_numeric,
+                                                                  na.rm = TRUE)) %>%
+          arrange(desc(mean_polideology))
+
+## cronbach's alpha for just world in our sample
+jw_items <- grep("jw\\_scale", colnames(model_df), value = TRUE)
+## apply coding function to all columns with that pattern
+model_df_foralpha <- model_df
+model_df_foralpha[, jw_items] = apply(model_df_foralpha[, jw_items], 2, 
+                                      function(x){
+                            case_when(grepl("disagreement", x) ~ 1,
+                                      grepl("agreement", x) ~ 6,
+                                      TRUE ~ as.numeric(x))}) # coding to numeric
+jw_ca <- alpha(model_df_foralpha[, jw_items])
+print(jw_ca) # cronbach's alpha result - 0.92
 
 ```
 
@@ -702,25 +744,24 @@ table(model_df$political_affil)
 ```{r}
 ## continuous regressing rank of points
 ## reverse coded so that pos coef = rank higher
-summary(lm(points_rank ~ is_any_barriers,
-           data = model_df))
+m1 <- lm(points_rank ~ is_any_barriers,
+           data = model_df)
 
 ## binary regressing points as first
 ## use lpm
-summary(lm(is_points_first ~ is_any_barriers,
-           data = model_df))
+m2 <- lm(is_points_first ~ is_any_barriers,
+           data = model_df)
 
-
+summary(m1)
+summary(m2)
 ```
 
 ```{r}
 ## save
-stargazer(lm(points_rank ~ is_any_barriers,
-           data = model_df),
-          lm(is_points_first ~ is_any_barriers,
-           data = model_df),
+stargazer(m1,
+          m2,
           type = "html",
-          out="../output/tables/maineffect_regs.doc")
+          out= here("output/tables/maineffect_regs.doc"))
 
 
 ```
@@ -753,24 +794,24 @@ barriers_r = model_df %>%
 
 ## when women is the tx, slightly more likely
 ## to rank points higher/first than when minority is tx
-summary(lm(points_rank ~ cond,
-           data = barriers_r))
+m1 <- lm(points_rank ~ cond,
+           data = barriers_r)
 
-summary(lm(is_points_first ~ cond,
-           data = barriers_r))
+m2 <- lm(is_points_first ~ cond,
+           data = barriers_r)
 
+summary(m1)
+summary(m2)
 
 ```
 
 
 ```{r}
 ## save
-stargazer(lm(points_rank ~ cond,
-           data = barriers_r),
-          lm(is_points_first ~ cond,
-           data = barriers_r),
+stargazer(m1,
+          m2,
           type = "html",
-          out="../output/tables/womenvmob_barriers_regs.doc")
+          out=here("output/tables/womenvmob_barriers_regs.doc"))
 
 
 
@@ -866,7 +907,7 @@ jw_prediction_graph = ggplot(predicted_rank_4graph, aes(x = jw_combined, y = est
 
 jw_prediction_graph
 
-ggsave("../output/figs/jw_prediction.png",
+ggsave(here("output/figs/jw_prediction.png"),
        plot = jw_prediction_graph,
        width = 12,
        height = 8) 
@@ -962,7 +1003,7 @@ pol_prediction_graph = ggplot(predicted_rank_4graph_pol, aes(x = factor(politica
 
 pol_prediction_graph
 
-ggsave("../output/figs/pol_prediction.png",
+ggsave(here("output/figs/pol_prediction.png"),
        plot = pol_prediction_graph,
        width = 12,
        height = 8) 
@@ -1019,10 +1060,10 @@ prop_themes_all = data.frame(proportion_resp = colMeans(model_df_wresp[, fr_them
             arrange(desc(proportion_resp))
 prop_themes_all$theme = rownames(prop_themes_all)
 write.table(prop_themes_all, 
-    file = "../output/tables/overall_fr_themes.txt",
+    file = here("output/tables/overall_fr_themes.txt"),
     sep = ",", quote = FALSE, row.names = F)
 write.csv(prop_themes_all, 
-    file = "../output/tables/overall_fr_themes.csv",
+    file = here("output/tables/overall_fr_themes.csv"),
      quote = FALSE, row.names = F)
 
 ## proportions by condition
@@ -1031,10 +1072,10 @@ prop_by_cond = model_df_wresp %>%
             summarise_at(.vars = fr_thematic_cols, mean) # for this, among no_info, since half randomzied to points system
             # about women or minorities, those mention that 
 write.table(prop_by_cond, 
-    file = "../output/tables/themes_by_treatcondition.txt",
+    file = here("output/tables/themes_by_treatcondition.txt"),
     sep = ",", quote = FALSE, row.names = F)
 write.csv(prop_by_cond, 
-    file = "../output/tables/themes_by_treatcondition.csv",
+    file = here("output/tables/themes_by_treatcondition.csv"),
      quote = FALSE, row.names = F)
 
 ## proportions by rank for points system
@@ -1043,10 +1084,10 @@ prop_by_rank = model_df_wresp %>%
             summarise_at(.vars = fr_thematic_cols, mean) # for this, among no_info, since half randomzied to points system
             # about women or minorities, those mention that 
 write.table(prop_by_rank, 
-    file = "../output/tables/themes_by_pointsranking.txt",
+    file = here("output/tables/themes_by_pointsranking.txt"),
     sep = ",", quote = FALSE, row.names = F)
 write.csv(prop_by_rank, 
-    file = "../output/tables/themes_by_pointsranking.csv",
+    file = here("output/tables/themes_by_pointsranking.csv"),
      quote = FALSE, row.names = F)
 
 
@@ -1078,7 +1119,7 @@ ggplot(prop_by_rank_long, aes(x = reorder(factor(theme_short), value), y = value
   theme(legend.position = c(0.7, 0.3)) +
   labs(fill = "Points\nsystem\nrank")
 
-ggsave("../output/figs/prop_frthemes_byrank.png",
+ggsave(here("output/figs/prop_frthemes_byrank.png"),
        plot = last_plot(),
        width = 12,
        height = 8) 
@@ -1122,7 +1163,7 @@ ggplot(prop_by_rank_byideol, aes(x = reorder(factor(theme_short), value), y = va
   facet_wrap(~ideology_broad, ncol = 3) 
   
 
-ggsave("../output/figs/prop_frthemes_byrank_byideology.png",
+ggsave(here("output/figs/prop_frthemes_byrank_byideology.png"),
        plot = last_plot(),
        width = 12,
        height = 8) 
@@ -1135,7 +1176,7 @@ ggsave("../output/figs/prop_frthemes_byrank_byideology.png",
 write.csv(model_df_wresp %>%
       arrange(desc(points_rank),
               political_affil_buckets),
-      "../output/fr_forquotes.csv",
+      here("output/fr_forquotes.csv"),
       row.names = FALSE) 
 
 ```
@@ -1184,7 +1225,7 @@ prop_choose_plot_nd <- ggplot(prop_choose_nd, aes(x = points_rank,
   ylab("Proportion respondents\nin condition choosing")
 
 prop_choose_plot_nd
-ggsave("../output/figs/rankings_prop_2groups_excludedemand.png",
+ggsave(here("output/figs/rankings_prop_2groups_excludedemand.png"),
        plot = prop_choose_plot_nd,
        width = 12,
        height = 8) 
@@ -1220,7 +1261,7 @@ prop_choose_plot_detail_nd <- ggplot(prop_choose_detail_nd, aes(x = points_rank,
   ylab("Proportion respondents\nin condition choosing")
 
 prop_choose_plot_detail_nd
-ggsave("../output/figs/rankings_prop_3groups_nd.png",
+ggsave(here("output/figs/rankings_prop_3groups_nd.png"),
        plot = prop_choose_plot_detail_nd,
        width = 12,
        height = 8) 
@@ -1259,7 +1300,7 @@ prop_choose_plot_detail_waffil_nd <- ggplot(prop_choose_detail_waffil_nd, aes(x 
                      ordered = TRUE), ncol = 2)
 
 prop_choose_plot_detail_waffil_nd
-ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil_nd.png",
+ggsave(here("output/figs/rankings_prop_3groups_wpoliticalaffil_nd.png"),
        plot = prop_choose_plot_detail_waffil_nd,
        width = 12,
        height = 8) 
@@ -1268,19 +1309,21 @@ ggsave("../output/figs/rankings_prop_3groups_wpoliticalaffil_nd.png",
 ## run two main regs
 ## continuous regressing rank of points
 ## reverse coded so that pos coef = rank higher
-summary(lm(points_rank ~ is_any_barriers,
-           data = model_df_nodemand))
+m1 <- lm(points_rank ~ is_any_barriers,
+           data = model_df_nodemand)
 
 ## binary regressing points as first
 ## use lpm
-summary(lm(is_points_first ~ is_any_barriers,
-           data = model_df_nodemand))
+m2 <- lm(is_points_first ~ is_any_barriers,
+           data = model_df_nodemand)
+
+summary(m1)
+summary(m2)
 
 
-stargazer(lm(points_rank ~ is_any_barriers,
-           data = model_df_nodemand),
-          lm(is_points_first ~ is_any_barriers,
-           data = model_df_nodemand))
+stargazer(m1,
+          m2,
+           data = model_df_nodemand)
 
 ```
 
@@ -1304,7 +1347,7 @@ jw_poli_ideo_plot = ggplot(model_df, aes(x = factor(political_ideology,
                     breaks = pretty_breaks(n = 6)) +
   coord_flip() 
 
-ggsave("../output/figs/jw_poli_ideo_plot.png",
+ggsave(here("output/figs/jw_poli_ideo_plot.png"),
        plot = jw_poli_ideo_plot,
        width = 12,
        height = 8) 
@@ -1326,7 +1369,7 @@ jw_poli_affil_plot = ggplot(model_df, aes(x = factor(political_affil_buckets,
                     breaks = pretty_breaks(n = 6)) +
   coord_flip() 
 
-ggsave("../output/figs/jw_poli_affil_plot.png",
+ggsave(here("output/figs/jw_poli_affil_plot.png"),
        plot = jw_poli_affil_plot,
        width = 12,
        height = 8) 
@@ -1343,7 +1386,7 @@ jw_poli_affil_plot <- ggplot(model_df, aes(x=political_ideology_numeric, na.rm =
   xlab("Combinded just world scale") +
   ylab("Count")
 jw_poli_affil_plot
-ggsave("../output/figs/jw_poli_affil_plot.png",
+ggsave(here("output/figs/jw_poli_affil_plot.png"),
        plot = jw_poli_affil_plot,
        width = 12,
        height = 8) 
