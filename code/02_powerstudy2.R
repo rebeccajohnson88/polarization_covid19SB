@@ -37,10 +37,10 @@ pwrss.f.regression(
   power = 0.80
 )
 
-## power with moderators - similarly use lower r^2 than bjw
-## sample size 680 due to higher r^2
+## power with moderators 
+## estimated sample size of 1356
 pwrss.f.regression(
-  r2 = 0.02,        # Expected R-squared
+  r2 = 0.01,        # Expected R-squared
   k = 6,            # points, barriers, bjw, bjw x points, bjw x barriers, bjw x points x barriers
   alpha = 0.05, 
   power = 0.80
